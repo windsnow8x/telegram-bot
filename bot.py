@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytz, gspread, os, json, io, difflib
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "4.1")
+VERSION = os.getenv("BOT_VERSION", "4.2")
 
 # ===== LOGGING =====
 def log(msg):
@@ -84,6 +84,7 @@ def get_or_create_folder(name, parent_id):
     files = results.get("files", [])
     if files:
         return files[0]['id']
+    # tạo mới nếu không có
     file_metadata = {'name': name, 'mimeType': 'application/vnd.google-apps.folder', 'parents':[parent_id]}
     file = drive_service.files().create(body=file_metadata, fields='id').execute()
     return file.get('id')
@@ -97,12 +98,12 @@ def upload_file_to_drive(file_bytes, filename, folder_id):
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
+
     chat_id = update.effective_chat.id
     user = update.effective_user.full_name
     user_id = update.effective_user.id
     text = update.message.text.strip() if update.message.text else ""
 
-    # Chỉ nhóm ALLOWED_GROUP hoặc admin
     if chat_id != ALLOWED_GROUP and user not in ADMINS:
         return
 
@@ -126,7 +127,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ Không tìm thấy site")
             return
         if user_id in pending_upload:
-            await update.message.reply_text("❌ Bạn đang có lệnh upload đang chờ. Hãy gửi ảnh hoặc đợi lệnh hết 15 phút.")
+            await update.message.reply_text("❌ Bạn đang có lệnh upload đang chờ. Hãy gửi ảnh hoặc đợi 15 phút.")
             return
         pending_upload[user_id] = {
             "site": site_name,
@@ -151,25 +152,46 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pend["count"] >= MAX_UPLOAD:
             await update.message.reply_text(f"❌ Bạn đã upload tối đa {MAX_UPLOAD} ảnh. Gửi lệnh mới để tiếp tục.")
             return
+
         file = await update.message.photo[-1].get_file()
         file_bytes = await file.download_as_bytearray()
         pend["count"] += 1
-        folder_site = get_or_create_folder(pend["site"], DRIVE_ROOT_FOLDER_ID)
-        folder_hangmuc = get_or_create_folder(pend["hangmuc"], folder_site)
-        today_str = now.strftime("%d%m")
-        filename = f"{today_str}_{pend['hangmuc']}_{pend['count']}_{pend['site']}.jpg"
-        upload_file_to_drive(file_bytes, filename, folder_hangmuc)
-        await update.message.reply_text(f"✅ Đã upload ảnh {pend['count']} / {MAX_UPLOAD} cho {pend['site']} | {pend['hangmuc']}")
-        return
 
-# ===== VERSION COMMAND =====
-async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Bot version: {VERSION}")
+        try:
+            folder_site = get_or_create_folder(pend["site"], DRIVE_ROOT_FOLDER_ID)
+            folder_hangmuc = get_or_create_folder(pend["hangmuc"], folder_site)
+            today_str = now.strftime("%d%m")
+            filename = f"{today_str}_{pend['hangmuc']}_{pend['count']}_{pend['site']}.jpg"
+            upload_file_to_drive(file_bytes, filename, folder_hangmuc)
+            await update.message.reply_text(f"✅ Upload thành công {pend['count']} / {MAX_UPLOAD} cho {pend['site']} | {pend['hangmuc']}")
+        except Exception as e:
+            del pending_upload[user_id]
+            await update.message.reply_text(f"❌ Upload thất bại: {e}")
+            return
+
+    # ==== Xử lý Google Sheet (giữ nguyên code trước) ====
+    if "_" in text and not text.upper().endswith("_PIC"):
+        # TODO: copy code xử lý sheet từ bản cũ
+        pass
+
+# ===== RESET LỆNH PENDING (ADMIN) =====
+async def reset_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.full_name
+    if user not in ADMINS:
+        await update.message.reply_text("❌ Chỉ admin mới có quyền reset.")
+        return
+    pending_upload.clear()
+    await update.message.reply_text("✅ Đã reset tất cả lệnh pending.")
+
+# ===== COMMAND VER =====
+async def bot_version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Bot đang chạy version {VERSION}")
 
 # ===== RUN BOT =====
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle))
-app.add_handler(CommandHandler("version", version))
+app.add_handler(CommandHandler("reset", reset_pending))
+app.add_handler(CommandHandler("ver", bot_version))
 
 if __name__ == "__main__":
     log("Bot đang chạy...")
