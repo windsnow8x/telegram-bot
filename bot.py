@@ -8,7 +8,7 @@ import os, json
 import difflib
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "2.0")
+VERSION = os.getenv("BOT_VERSION", "2.1")
 
 def log(msg):
     now = datetime.now().strftime("%d/%m %H:%M:%S")
@@ -40,19 +40,12 @@ google_cred = os.getenv("GOOGLE_CRED")
 if not google_cred:
     raise Exception("❌ GOOGLE_CRED chưa được set")
 
-try:
-    cred_dict = json.loads(google_cred)
-except Exception as e:
-    raise Exception(f"❌ JSON GOOGLE_CRED lỗi: {e}")
-
+cred_dict = json.loads(google_cred)
 creds = Credentials.from_service_account_info(cred_dict, scopes=scope)
 client = gspread.authorize(creds)
 
-try:
-    sheet_progress = client.open_by_key(SHEET_ID).worksheet("Progress")
-    log("✅ Kết nối Google Sheet OK")
-except Exception as e:
-    raise Exception(f"❌ Không mở được Google Sheet: {e}")
+sheet_progress = client.open_by_key(SHEET_ID).worksheet("Progress")
+log("✅ Kết nối Google Sheet OK")
 
 # ===== CỘT =====
 COL_MAP = {
@@ -145,15 +138,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not found:
         close_matches = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
         if close_matches:
-            await update.message.reply_text(f"❌ Không tìm thấy site. Gợi ý gần đúng: {', '.join(close_matches)}")
+            await update.message.reply_text(f"❌ Không tìm thấy site. Gợi ý: {', '.join(close_matches)}")
         else:
             await update.message.reply_text("❌ Sai cú pháp hoặc không tìm thấy site")
 
 # ===== UNDO =====
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
-        return
-
     user = update.effective_user.full_name
     parts = update.message.text.split()
 
@@ -201,17 +191,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.upper()
-    parts = text.split("_")
-
-    if len(parts) < 2:
-        await update.message.reply_text("Sai cú pháp")
-        return
-
-    hangmuc = parts[1]
-
-    if hangmuc not in COL_MAP:
-        await update.message.reply_text("Sai hạng mục")
-        return
+    hangmuc = text.split("_")[1]
 
     col_bd = col2num(COL_MAP[hangmuc]["BD"])
     col_kt = col2num(COL_MAP[hangmuc]["KT"])
@@ -224,7 +204,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     done_list = []
     total_done = 0
     total_today_done = 0
-    total_today_doing = 0
 
     for row in rows[2:]:
         if len(row) < col_kt:
@@ -235,33 +214,58 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kt = row[col_kt-1]
         user_val = row[col_user-1] or "N/A"
 
-        # Lũy kế hoàn thành
         if kt:
             total_done += 1
 
-        # Hoàn thành hôm nay
         if kt and today in kt:
             total_today_done += 1
             done_list.append(f"{site} | ✅ {user_val} ({kt})")
-
-        # Đang làm hôm nay
         elif bd and today in bd:
-            total_today_doing += 1
             doing_list.append(f"{site} | 🟡 {user_val} ({bd})")
 
     msg = f"📊 {hangmuc} HÔM NAY ({today})\n\n"
     msg += f"📌 Hoàn thành hôm nay: {total_today_done}/{len(rows)-2} sites\n"
-    msg += f"📌 Lũy kế hoàn thành: {total_done}/{len(rows)-2} sites\n"
-    msg += f"🟡 Đang làm: {total_today_doing}\n"
-    msg += f"✅ Hoàn thành: {total_today_done}\n\n"
+    msg += f"📌 Lũy kế hoàn thành: {total_done}/{len(rows)-2} sites\n\n"
 
     if doing_list:
-        msg += "🟡 ĐANG LÀM\n"
-        msg += "\n".join(doing_list) + "\n\n"
+        msg += "🟡 ĐANG LÀM\n" + "\n".join(doing_list) + "\n\n"
 
     if done_list:
-        msg += "✅ HOÀN THÀNH\n"
-        msg += "\n".join(done_list)
+        msg += "✅ HOÀN THÀNH\n" + "\n".join(done_list)
+
+    await update.message.reply_text(msg)
+
+# ===== REPORT =====
+async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.full_name
+    if user not in ADMINS:
+        return
+
+    rows = sheet_progress.get_all_values()
+    today = datetime.now().strftime("%d/%m")
+    now_full = datetime.now().strftime("%d/%m %H:%M")
+
+    total_sites = len(rows) - 2
+    msg = f"📊 UPDATE TIẾN ĐỘ ({now_full})\n\n"
+
+    for hangmuc, cols in COL_MAP.items():
+        col_kt = col2num(cols["KT"])
+
+        total_done = 0
+        today_done = 0
+
+        for row in rows[2:]:
+            if len(row) < col_kt:
+                continue
+
+            kt = row[col_kt-1]
+
+            if kt:
+                total_done += 1
+                if today in kt:
+                    today_done += 1
+
+        msg += f"- {hangmuc}: {today_done} / {total_done} / {total_sites}\n"
 
     await update.message.reply_text(msg)
 
@@ -270,6 +274,7 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle))
 app.add_handler(CommandHandler("undo", undo))
+app.add_handler(CommandHandler("report", report))
 
 for h in COL_MAP.keys():
     app.add_handler(CommandHandler(f"status_{h}", status))
