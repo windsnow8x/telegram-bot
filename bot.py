@@ -79,13 +79,11 @@ MAX_UPLOAD = 5
 
 # ===== HELPER DRIVE =====
 def get_or_create_folder(name, parent_id):
-    # Kiểm tra folder có sẵn
     query = f"mimeType='application/vnd.google-apps.folder' and trashed=false and name='{name}' and '{parent_id}' in parents"
     results = drive_service.files().list(q=query, fields="files(id, name)").execute()
     files = results.get("files", [])
     if files:
         return files[0]['id']
-    # Nếu không có thì tạo mới
     file_metadata = {'name': name, 'mimeType': 'application/vnd.google-apps.folder', 'parents':[parent_id]}
     file = drive_service.files().create(body=file_metadata, fields='id').execute()
     return file.get('id')
@@ -97,12 +95,12 @@ def upload_file_to_drive(file_bytes, filename, folder_id):
 
 # ===== HANDLE MESSAGE =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
+    if not update.message:
         return
     chat_id = update.effective_chat.id
     user = update.effective_user.full_name
     user_id = update.effective_user.id
-    text = update.message.text.strip()
+    text = update.message.text.strip() if update.message.text else ""
 
     # Chỉ nhóm ALLOWED_GROUP hoặc admin
     if chat_id != ALLOWED_GROUP and user not in ADMINS:
@@ -121,14 +119,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Sai cú pháp lệnh _PIC")
             return
         if site_name.upper() not in sites_upper:
-            # gợi ý tên gần đúng
             close = difflib.get_close_matches(site_name.upper(), sites_upper, n=3, cutoff=0.5)
             if close:
                 await update.message.reply_text(f"❌ Không tìm thấy site. Gợi ý: {', '.join(close)}")
             else:
                 await update.message.reply_text("❌ Không tìm thấy site")
             return
-        # Kiểm tra pending trước đó
         if user_id in pending_upload:
             await update.message.reply_text("❌ Bạn đang có lệnh upload đang chờ. Hãy gửi ảnh hoặc đợi lệnh hết 15 phút.")
             return
@@ -147,7 +143,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Bạn chưa gửi lệnh _PIC trước khi gửi ảnh.")
             return
         pend = pending_upload[user_id]
-        # Kiểm tra timeout
         now = datetime.now(pytz.timezone("Asia/Ho_Chi_Minh"))
         if (now - pend["time"]).total_seconds() > PENDING_TIMEOUT*60:
             del pending_upload[user_id]
@@ -156,28 +151,25 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pend["count"] >= MAX_UPLOAD:
             await update.message.reply_text(f"❌ Bạn đã upload tối đa {MAX_UPLOAD} ảnh. Gửi lệnh mới để tiếp tục.")
             return
-        # Lấy ảnh chất lượng cao nhất
         file = await update.message.photo[-1].get_file()
         file_bytes = await file.download_as_bytearray()
         pend["count"] += 1
-        # Tạo folder trên Drive
         folder_site = get_or_create_folder(pend["site"], DRIVE_ROOT_FOLDER_ID)
         folder_hangmuc = get_or_create_folder(pend["hangmuc"], folder_site)
-        # Tên ảnh
         today_str = now.strftime("%d%m")
         filename = f"{today_str}_{pend['hangmuc']}_{pend['count']}_{pend['site']}.jpg"
         upload_file_to_drive(file_bytes, filename, folder_hangmuc)
         await update.message.reply_text(f"✅ Đã upload ảnh {pend['count']} / {MAX_UPLOAD} cho {pend['site']} | {pend['hangmuc']}")
         return
 
-    # ==== Xử lý Google Sheet (giữ nguyên như cũ) ====
-    if "_" not in text:
-        return
-    # Phần xử lý Sheet giữ nguyên, bạn có thể copy từ code trước của bạn
+# ===== VERSION COMMAND =====
+async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Bot version: {VERSION}")
 
 # ===== RUN BOT =====
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle))
+app.add_handler(CommandHandler("version", version))
 
 if __name__ == "__main__":
     log("Bot đang chạy...")
