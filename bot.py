@@ -14,7 +14,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "7.6")
+VERSION = os.getenv("BOT_VERSION", "7.7")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -158,7 +158,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pend["count"] += 1
 
             filename = f"{now.strftime('%d%m')}_{pend['hangmuc']}_{pend['count']}.jpg"
-            dropbox_path = f"/{pend['site']}/{pend['hangmuc']}/{filename}"
+            # ===== UPDATE PATH DROPBOX =====
+            dropbox_path = f"/MBF HW/{pend['site']}/{pend['hangmuc']}/{filename}"
 
             log(f"UPLOAD: {dropbox_path}")
 
