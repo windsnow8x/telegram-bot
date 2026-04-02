@@ -14,7 +14,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "5.1")
+VERSION = os.getenv("BOT_VERSION", "6.0")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -63,7 +63,7 @@ def col2num(col):
         num = num*26 + (ord(c.upper()) - ord("A")) + 1
     return num
 
-# ===== PENDING =====
+# ===== PENDING UPLOAD =====
 pending_upload = {}
 MAX_UPLOAD = 5
 TIMEOUT = 5  # phút
@@ -87,11 +87,19 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ================= PIC COMMAND =================
     if text.upper().endswith("_PIC"):
         cmd = text.upper().split("_")
+        if len(cmd) < 3:
+            await update.message.reply_text("❌ Sai cú pháp _PIC")
+            return
+
         hangmuc = cmd[-2]
         site_name = "_".join(cmd[:-2])
 
         if site_name not in sites_upper:
-            await update.message.reply_text("❌ Không tìm thấy site")
+            close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
+            if close:
+                await update.message.reply_text(f"❌ Sai site. Gợi ý: {', '.join(close)}")
+            else:
+                await update.message.reply_text("❌ Không tìm thấy site")
             return
 
         pending_upload[user_id] = {
@@ -101,19 +109,17 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "count": 0
         }
 
-        await update.message.reply_text(f"📸 Chờ upload ảnh {site_name} | {hangmuc} (tối đa 5 ảnh / 5 phút)")
+        await update.message.reply_text(f"📸 Chờ upload {site_name} | {hangmuc} (tối đa 5 ảnh / 5 phút)")
         return
 
     # ================= RECEIVE PHOTO =================
     if update.message.photo:
         if user_id not in pending_upload:
-            await update.message.reply_text("❌ Chưa có lệnh _PIC")
             return
 
         pend = pending_upload[user_id]
         now = now_vn()
 
-        # timeout
         if (now - pend["time"]).total_seconds() > TIMEOUT*60:
             del pending_upload[user_id]
             await update.message.reply_text("❌ Hết hạn upload")
@@ -124,28 +130,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         try:
-            await update.message.reply_text("⏳ Đang upload Dropbox...")
-
             file = await update.message.photo[-1].get_file()
-            file_bytes = await file.download_as_bytearray()
-
-            # 🔥 FIX BYTEARRAY
-            file_bytes = bytes(file_bytes)
+            file_bytes = bytes(await file.download_as_bytearray())
 
             pend["count"] += 1
-
             filename = f"{now.strftime('%d%m')}_{pend['hangmuc']}_{pend['count']}.jpg"
-            dropbox_path = f"/{pend['site']}/{pend['hangmuc']}/{filename}"
+            path = f"/{pend['site']}/{pend['hangmuc']}/{filename}"
 
-            log(f"UPLOAD: {dropbox_path}")
-
-            dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+            dbx.files_upload(file_bytes, path, mode=dropbox.files.WriteMode.overwrite)
 
             await update.message.reply_text(f"✅ Upload {pend['count']}/5")
 
         except Exception as e:
             log(f"ERROR: {e}")
-            await update.message.reply_text(f"❌ Upload lỗi: {e}")
+            await update.message.reply_text(f"❌ Upload lỗi")
 
         return
 
@@ -158,16 +156,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note = parts[1] if len(parts) > 1 else ""
 
     cmd_parts = cmd_site.split("_")
+    if len(cmd_parts) < 3:
+        return
+
     hangmuc = cmd_parts[-2]
     action = cmd_parts[-1]
     site_name = "_".join(cmd_parts[:-2])
 
+    if hangmuc not in COL_MAP:
+        await update.message.reply_text("❌ Sai hạng mục")
+        return
+
     for idx, sheet_site in enumerate(sites, start=1):
         if sheet_site.strip().upper() != site_name:
             continue
-
-        if hangmuc not in COL_MAP:
-            return
 
         cols = COL_MAP[hangmuc]
 
@@ -181,105 +183,43 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bd = sheet_progress.cell(idx, col_bd).value
         kt = sheet_progress.cell(idx, col_kt).value
 
-        if action == "BD":
-            sheet_progress.update_cell(idx, col_bd, now_str)
-            if not kt:
-                sheet_progress.update_cell(idx, col_user, user)
+        # ===== NOTE =====
+        if note:
+            old = sheet_progress.cell(idx, col_note).value
+            new = f"[{now_vn().strftime('%d/%m')}]: {note}"
+            combined = f"{old}\n{new}" if old else new
+            sheet_progress.update_cell(idx, col_note, combined)
+            await update.message.reply_text("✅ Đã ghi chú")
+            return
 
-        elif action == "KT":
-            sheet_progress.update_cell(idx, col_kt, now_str)
+        # ===== BD =====
+        if action == "BD":
+            if bd:
+                await update.message.reply_text("❌ Đã BD trước đó")
+                return
+
+            sheet_progress.update_cell(idx, col_bd, now_str)
             sheet_progress.update_cell(idx, col_user, user)
 
-        elif note:
-            sheet_progress.update_cell(idx, col_note, note)
+        # ===== KT =====
+        elif action == "KT":
+            if kt:
+                await update.message.reply_text("❌ Đã KT trước đó")
+                return
+
+            sheet_progress.update_cell(idx, col_kt, now_str)
+            if not sheet_progress.cell(idx, col_user).value:
+                sheet_progress.update_cell(idx, col_user, user)
 
         await update.message.reply_text("✅ OK")
         return
 
-# ===== RESET =====
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.full_name
-    if user not in ADMINS:
-        return
-    pending_upload.clear()
-    await update.message.reply_text("✅ Reset pending")
-
-# ===== HANDLE =====
-async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    chat_id = update.effective_chat.id
-    text = update.message.text.strip()
-    user = update.effective_user.full_name
-
-    if chat_id != ALLOWED_GROUP and user not in ADMINS:
-        return
-
-    if "_" not in text:
-        return
-
-    parts = text.split(" ", 1)
-    cmd_site = parts[0].upper()
-    note_content = parts[1].strip() if len(parts) > 1 else ""
-
-    sites = sheet_progress.col_values(4)
-    sites_upper = [s.strip().upper() for s in sites if s.strip()]
-    found = False
-
-    for hangmuc, cols in COL_MAP.items():
-        if hangmuc not in cmd_site:
-            continue
-
-        col_bd = col2num(cols["BD"])
-        col_kt = col2num(cols["KT"])
-        col_user = col2num(cols["USER"])
-        col_ghichu = col2num(cols["GHICHU"])
-
-        site_name = cmd_site.split("_" + hangmuc)[0]
-
-        for idx, sheet_site in enumerate(sites, start=1):
-            if sheet_site.strip().upper() != site_name:
-                continue
-
-            now = datetime.now().strftime("%d/%m %H:%M")
-
-            if cmd_site.endswith("_BD"):
-                if sheet_progress.cell(idx, col_bd).value:
-                    await update.message.reply_text(f"{sheet_site} đã BD trước đó")
-                    return
-                sheet_progress.update_cell(idx, col_bd, now)
-                sheet_progress.update_cell(idx, col_user, user)
-                await update.message.reply_text(f"{cmd_site} BẮT ĐẦU OK")
-
-            elif cmd_site.endswith("_KT"):
-                if sheet_progress.cell(idx, col_kt).value:
-                    await update.message.reply_text(f"{sheet_site} đã KT trước đó")
-                    return
-                sheet_progress.update_cell(idx, col_kt, now)
-                if not sheet_progress.cell(idx, col_user).value:
-                    sheet_progress.update_cell(idx, col_user, user)
-                await update.message.reply_text(f"{cmd_site} KẾT THÚC OK")
-
-            elif note_content:
-                old_note = sheet_progress.cell(idx, col_ghichu).value
-                new_note = f"[{datetime.now().strftime('%d/%m')}]: {note_content}"
-                combined = f"{old_note}\n{new_note}" if old_note else new_note
-                sheet_progress.update_cell(idx, col_ghichu, combined)
-                await update.message.reply_text("✅ Đã ghi chú")
-
-            found = True
-            break
-
-        if found:
-            break
-
-    if not found:
-        close_matches = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
-        if close_matches:
-            await update.message.reply_text(f"❌ Không tìm thấy site. Gợi ý: {', '.join(close_matches)}")
-        else:
-            await update.message.reply_text("❌ Sai cú pháp hoặc không tìm thấy site")
+    # ===== NOT FOUND =====
+    close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
+    if close:
+        await update.message.reply_text(f"❌ Không thấy site. Gợi ý: {', '.join(close)}")
+    else:
+        await update.message.reply_text("❌ Sai cú pháp")
 
 # ===== UNDO =====
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -287,41 +227,33 @@ async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = update.message.text.split()
 
     if len(parts) < 2:
-        await update.message.reply_text("Dùng: /undo SITE_HẠNGMỤC")
+        await update.message.reply_text("Dùng: /undo SITE_HM")
         return
 
-    cmd_site = parts[1].upper()
+    cmd = parts[1].upper().split("_")
+    if len(cmd) < 2:
+        return
+
+    hangmuc = cmd[-1]
+    site_name = "_".join(cmd[:-1])
+
     sites = sheet_progress.col_values(4)
 
-    for hangmuc, cols in COL_MAP.items():
-        if hangmuc not in cmd_site:
+    for idx, sheet_site in enumerate(sites, start=1):
+        if sheet_site.strip().upper() != site_name:
             continue
 
-        col_bd = col2num(cols["BD"])
-        col_kt = col2num(cols["KT"])
-        col_user = col2num(cols["USER"])
-        col_ghichu = col2num(cols["GHICHU"])
-
-        site_name = cmd_site.split("_" + hangmuc)[0]
-
-        for idx, sheet_site in enumerate(sites, start=1):
-            if sheet_site.strip().upper() != site_name:
-                continue
-
-            current_user = sheet_progress.cell(idx, col_user).value
-            if current_user and current_user != user and user not in ADMINS:
-                await update.message.reply_text("❌ Không có quyền undo")
-                return
-
-            sheet_progress.update_cell(idx, col_bd, "")
-            sheet_progress.update_cell(idx, col_kt, "")
-            sheet_progress.update_cell(idx, col_user, "")
-            sheet_progress.update_cell(idx, col_ghichu, "")
-
-            await update.message.reply_text(f"✅ Undo {cmd_site}")
+        cols = COL_MAP.get(hangmuc)
+        if not cols:
             return
 
-    await update.message.reply_text("❌ Không tìm thấy")
+        sheet_progress.update_cell(idx, col2num(cols["BD"]), "")
+        sheet_progress.update_cell(idx, col2num(cols["KT"]), "")
+        sheet_progress.update_cell(idx, col2num(cols["USER"]), "")
+        sheet_progress.update_cell(idx, col2num(cols["GHICHU"]), "")
+
+        await update.message.reply_text("✅ Undo OK")
+        return
 
 # ===== STATUS =====
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,49 +262,35 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text.upper()
-    hangmuc = text.split("_")[1]
+    if "_" not in text:
+        return
 
-    col_bd = col2num(COL_MAP[hangmuc]["BD"])
-    col_kt = col2num(COL_MAP[hangmuc]["KT"])
-    col_user = col2num(COL_MAP[hangmuc]["USER"])
+    hangmuc = text.split("_")[1]
+    if hangmuc not in COL_MAP:
+        return
 
     rows = sheet_progress.get_all_values()
-    today = datetime.now().strftime("%d/%m")
+    today = now_vn().strftime("%d/%m")
 
-    doing_list = []
-    done_list = []
-    total_done = 0
-    total_today_done = 0
+    col_kt = col2num(COL_MAP[hangmuc]["KT"])
+
+    total = len(rows) - 2
+    done = 0
+    today_done = 0
 
     for row in rows[2:]:
         if len(row) < col_kt:
             continue
 
-        site = row[3]
-        bd = row[col_bd-1]
         kt = row[col_kt-1]
-        user_val = row[col_user-1] or "N/A"
-
         if kt:
-            total_done += 1
+            done += 1
+            if today in kt:
+                today_done += 1
 
-        if kt and today in kt:
-            total_today_done += 1
-            done_list.append(f"{site} | ✅ {user_val} ({kt})")
-        elif bd and today in bd:
-            doing_list.append(f"{site} | 🟡 {user_val} ({bd})")
-
-    msg = f"📊 {hangmuc} HÔM NAY ({today})\n\n"
-    msg += f"📌 Hoàn thành hôm nay: {total_today_done}/{len(rows)-2} sites\n"
-    msg += f"📌 Lũy kế hoàn thành: {total_done}/{len(rows)-2} sites\n\n"
-
-    if doing_list:
-        msg += "🟡 ĐANG LÀM\n" + "\n".join(doing_list) + "\n\n"
-
-    if done_list:
-        msg += "✅ HOÀN THÀNH\n" + "\n".join(done_list)
-
-    await update.message.reply_text(msg)
+    await update.message.reply_text(
+        f"📊 {hangmuc}\nHôm nay: {today_done}/{total}\nLũy kế: {done}/{total}"
+    )
 
 # ===== REPORT =====
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,16 +299,14 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rows = sheet_progress.get_all_values()
-    today = datetime.now().strftime("%d/%m")
-    now_full = datetime.now().strftime("%d/%m %H:%M")
+    today = now_vn().strftime("%d/%m")
 
-    total_sites = len(rows) - 2
-    msg = f"📊 UPDATE TIẾN ĐỘ ({now_full})\n\n"
+    msg = f"📊 REPORT {today}\n\n"
 
-    for hangmuc, cols in COL_MAP.items():
+    for hm, cols in COL_MAP.items():
         col_kt = col2num(cols["KT"])
 
-        total_done = 0
+        done = 0
         today_done = 0
 
         for row in rows[2:]:
@@ -398,20 +314,31 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             kt = row[col_kt-1]
-
             if kt:
-                total_done += 1
+                done += 1
                 if today in kt:
                     today_done += 1
 
-        msg += f"- {hangmuc}: {today_done} / {total_done} / {total_sites}\n"
+        msg += f"{hm}: {today_done}/{done}\n"
 
     await update.message.reply_text(msg)
+
+# ===== RESET =====
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.full_name
+    if user not in ADMINS:
+        return
+
+    pending_upload.clear()
+    await update.message.reply_text("✅ Reset pending")
 
 # ===== RUN =====
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle))
+app.add_handler(CommandHandler("undo", undo))
+app.add_handler(CommandHandler("status", status))
+app.add_handler(CommandHandler("report", report))
 app.add_handler(CommandHandler("reset", reset))
 
 if __name__ == "__main__":
