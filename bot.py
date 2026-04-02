@@ -14,7 +14,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "6.1")
+VERSION = os.getenv("BOT_VERSION", "7.0")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -50,6 +50,28 @@ log("✅ Sheet OK")
 # ===== DROPBOX =====
 dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 
+# ===== CACHE =====
+cache_data = None
+cache_time = None
+CACHE_TTL = 15
+
+def get_sheet_data():
+    global cache_data, cache_time
+
+    now = now_vn()
+
+    if cache_data and cache_time:
+        if (now - cache_time).total_seconds() < CACHE_TTL:
+            return cache_data
+
+    cache_data = sheet_progress.get_all_values()
+    cache_time = now
+    return cache_data
+
+def clear_cache():
+    global cache_data
+    cache_data = None
+
 # ===== CỘT =====
 COL_MAP = {
     "KS": {"BD":"Q", "KT":"R", "USER":"S", "GHICHU":"T"},
@@ -75,7 +97,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip() if update.message.text else ""
 
-    # 🔥 FIX: không xử lý command ở đây
+    # 🔥 bỏ qua command
     if text.startswith("/"):
         return
 
@@ -89,7 +111,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sites = sheet_progress.col_values(4)
     sites_upper = [s.strip().upper() for s in sites if s.strip()]
 
-    # ================= PIC =================
+    # ===== PIC =====
     if text.upper().endswith("_PIC"):
         cmd = text.upper().split("_")
 
@@ -115,7 +137,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📸 Chờ upload {site_name}")
         return
 
-    # ================= PHOTO =================
+    # ===== PHOTO =====
     if update.message.photo:
         if user_id not in pending_upload:
             return
@@ -138,7 +160,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Upload {pend['count']}/5")
         return
 
-    # ================= SHEET =================
+    # ===== SHEET =====
     if "_" not in text:
         return
 
@@ -165,22 +187,31 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cols = COL_MAP[hangmuc]
         now_str = now_vn().strftime("%d/%m %H:%M")
 
+        # ===== NOTE =====
         if note:
             old = sheet_progress.cell(idx, col2num(cols["GHICHU"])).value
             new = f"[{now_vn().strftime('%d/%m')}]: {note}"
             sheet_progress.update_cell(idx, col2num(cols["GHICHU"]), f"{old}\n{new}" if old else new)
+            clear_cache()
             await update.message.reply_text("✅ Đã ghi chú")
             return
 
+        # ===== BD =====
         if action == "BD":
             sheet_progress.update_cell(idx, col2num(cols["BD"]), now_str)
             sheet_progress.update_cell(idx, col2num(cols["USER"]), user)
+            clear_cache()
 
+        # ===== KT =====
         elif action == "KT":
             sheet_progress.update_cell(idx, col2num(cols["KT"]), now_str)
+            clear_cache()
 
         await update.message.reply_text("✅ OK")
         return
+
+    close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
+    await update.message.reply_text(f"❌ Không thấy site. Gợi ý: {', '.join(close)}")
 
 # ===== STATUS =====
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -190,7 +221,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.upper()
 
-    # hỗ trợ cả 2 kiểu
     if context.args:
         hangmuc = context.args[0].upper()
     elif "_" in text:
@@ -203,28 +233,48 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Hạng mục không hợp lệ")
         return
 
-    rows = sheet_progress.get_all_values()
+    rows = get_sheet_data()
     today = now_vn().strftime("%d/%m")
 
+    col_bd = col2num(COL_MAP[hangmuc]["BD"])
     col_kt = col2num(COL_MAP[hangmuc]["KT"])
+    col_user = col2num(COL_MAP[hangmuc]["USER"])
 
-    total = len(rows) - 2
-    done = 0
-    today_done = 0
+    doing_list = []
+    done_list = []
+    total_done = 0
+    total_today_done = 0
+    total_sites = len(rows) - 2
 
     for row in rows[2:]:
         if len(row) < col_kt:
             continue
 
+        site = row[3]
+        bd = row[col_bd-1]
         kt = row[col_kt-1]
-        if kt:
-            done += 1
-            if today in kt:
-                today_done += 1
+        user_val = row[col_user-1] or "N/A"
 
-    await update.message.reply_text(
-        f"📊 {hangmuc}\nHôm nay: {today_done}/{total}\nLũy kế: {done}/{total}"
-    )
+        if kt:
+            total_done += 1
+
+        if kt and today in kt:
+            total_today_done += 1
+            done_list.append(f"{site} | ✅ {user_val} ({kt})")
+        elif bd and today in bd:
+            doing_list.append(f"{site} | 🟡 {user_val} ({bd})")
+
+    msg = f"📊 {hangmuc} HÔM NAY ({today})\n\n"
+    msg += f"📌 Hoàn thành hôm nay: {total_today_done}/{total_sites}\n"
+    msg += f"📌 Lũy kế hoàn thành: {total_done}/{total_sites}\n\n"
+
+    if doing_list:
+        msg += "🟡 ĐANG LÀM\n" + "\n".join(doing_list) + "\n\n"
+
+    if done_list:
+        msg += "✅ HOÀN THÀNH\n" + "\n".join(done_list)
+
+    await update.message.reply_text(msg)
 
 # ===== REPORT =====
 async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -232,7 +282,7 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user not in ADMINS:
         return
 
-    rows = sheet_progress.get_all_values()
+    rows = get_sheet_data()
     today = now_vn().strftime("%d/%m")
 
     msg = f"📊 REPORT {today}\n\n"
@@ -269,12 +319,10 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== RUN =====
 app = ApplicationBuilder().token(TOKEN).build()
 
-# command trước
 app.add_handler(CommandHandler("status", status))
 app.add_handler(CommandHandler("report", report))
 app.add_handler(CommandHandler("reset", reset))
 
-# text sau
 app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle))
 
 if __name__ == "__main__":
