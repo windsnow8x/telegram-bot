@@ -4,14 +4,21 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
+import pytz
 import os, json
 import difflib
 
+# ===== TIMEZONE VN =====
+VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
+
+def now_vn():
+    return datetime.now(VN_TZ)
+
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "2.1")
+VERSION = os.getenv("BOT_VERSION", "2.2")
 
 def log(msg):
-    now = datetime.now().strftime("%d/%m %H:%M:%S")
+    now = now_vn().strftime("%d/%m %H:%M:%S")
     print(f"[{now}] {msg}")
 
 log(f"🚀 START BOT - VERSION {VERSION}")
@@ -84,56 +91,77 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd_site = parts[0].upper()
     note_content = parts[1].strip() if len(parts) > 1 else ""
 
+    # ===== TÁCH CHUẨN =====
+    cmd_parts = cmd_site.split("_")
+    if len(cmd_parts) < 3:
+        return
+
+    hangmuc = cmd_parts[-2]
+    action = cmd_parts[-1]
+    site_name = "_".join(cmd_parts[:-2])
+
     sites = sheet_progress.col_values(4)
     sites_upper = [s.strip().upper() for s in sites if s.strip()]
+
     found = False
 
-    for hangmuc, cols in COL_MAP.items():
-        if hangmuc not in cmd_site:
+    for idx, sheet_site in enumerate(sites, start=1):
+        if sheet_site.strip().upper() != site_name:
             continue
+
+        if hangmuc not in COL_MAP:
+            continue
+
+        cols = COL_MAP[hangmuc]
 
         col_bd = col2num(cols["BD"])
         col_kt = col2num(cols["KT"])
         col_user = col2num(cols["USER"])
         col_ghichu = col2num(cols["GHICHU"])
 
-        site_name = cmd_site.split("_" + hangmuc)[0]
+        now_str = now_vn().strftime("%d/%m %H:%M")
 
-        for idx, sheet_site in enumerate(sites, start=1):
-            if sheet_site.strip().upper() != site_name:
-                continue
+        bd_val = sheet_progress.cell(idx, col_bd).value
+        kt_val = sheet_progress.cell(idx, col_kt).value
 
-            now = datetime.now().strftime("%d/%m %H:%M")
+        # ===== BD =====
+        if action == "BD":
+            if bd_val:
+                await update.message.reply_text(f"{sheet_site} đã BD trước đó")
+                return
 
-            if cmd_site.endswith("_BD"):
-                if sheet_progress.cell(idx, col_bd).value:
-                    await update.message.reply_text(f"{sheet_site} đã BD trước đó")
-                    return
-                sheet_progress.update_cell(idx, col_bd, now)
+            sheet_progress.update_cell(idx, col_bd, now_str)
+
+            # 👉 Nếu chưa KT → user = BD
+            if not kt_val:
                 sheet_progress.update_cell(idx, col_user, user)
-                await update.message.reply_text(f"{cmd_site} BẮT ĐẦU OK")
 
-            elif cmd_site.endswith("_KT"):
-                if sheet_progress.cell(idx, col_kt).value:
-                    await update.message.reply_text(f"{sheet_site} đã KT trước đó")
-                    return
-                sheet_progress.update_cell(idx, col_kt, now)
-                if not sheet_progress.cell(idx, col_user).value:
-                    sheet_progress.update_cell(idx, col_user, user)
-                await update.message.reply_text(f"{cmd_site} KẾT THÚC OK")
+            await update.message.reply_text(f"{cmd_site} BẮT ĐẦU OK")
 
-            elif note_content:
-                old_note = sheet_progress.cell(idx, col_ghichu).value
-                new_note = f"[{datetime.now().strftime('%d/%m')}]: {note_content}"
-                combined = f"{old_note}\n{new_note}" if old_note else new_note
-                sheet_progress.update_cell(idx, col_ghichu, combined)
-                await update.message.reply_text("✅ Đã ghi chú")
+        # ===== KT =====
+        elif action == "KT":
+            if kt_val:
+                await update.message.reply_text(f"{sheet_site} đã KT trước đó")
+                return
 
-            found = True
-            break
+            sheet_progress.update_cell(idx, col_kt, now_str)
 
-        if found:
-            break
+            # 👉 Có KT → user = KT
+            sheet_progress.update_cell(idx, col_user, user)
+
+            await update.message.reply_text(f"{cmd_site} KẾT THÚC OK")
+
+        # ===== NOTE =====
+        elif note_content:
+            old_note = sheet_progress.cell(idx, col_ghichu).value
+            new_note = f"[{now_vn().strftime('%d/%m')}]: {note_content}"
+            combined = f"{old_note}\n{new_note}" if old_note else new_note
+
+            sheet_progress.update_cell(idx, col_ghichu, combined)
+            await update.message.reply_text("✅ Đã ghi chú")
+
+        found = True
+        break
 
     if not found:
         close_matches = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
@@ -152,35 +180,39 @@ async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     cmd_site = parts[1].upper()
+
+    cmd_parts = cmd_site.split("_")
+    hangmuc = cmd_parts[-1]
+    site_name = "_".join(cmd_parts[:-1])
+
     sites = sheet_progress.col_values(4)
 
-    for hangmuc, cols in COL_MAP.items():
-        if hangmuc not in cmd_site:
+    for idx, sheet_site in enumerate(sites, start=1):
+        if sheet_site.strip().upper() != site_name:
             continue
+
+        if hangmuc not in COL_MAP:
+            continue
+
+        cols = COL_MAP[hangmuc]
 
         col_bd = col2num(cols["BD"])
         col_kt = col2num(cols["KT"])
         col_user = col2num(cols["USER"])
         col_ghichu = col2num(cols["GHICHU"])
 
-        site_name = cmd_site.split("_" + hangmuc)[0]
-
-        for idx, sheet_site in enumerate(sites, start=1):
-            if sheet_site.strip().upper() != site_name:
-                continue
-
-            current_user = sheet_progress.cell(idx, col_user).value
-            if current_user and current_user != user and user not in ADMINS:
-                await update.message.reply_text("❌ Không có quyền undo")
-                return
-
-            sheet_progress.update_cell(idx, col_bd, "")
-            sheet_progress.update_cell(idx, col_kt, "")
-            sheet_progress.update_cell(idx, col_user, "")
-            sheet_progress.update_cell(idx, col_ghichu, "")
-
-            await update.message.reply_text(f"✅ Undo {cmd_site}")
+        current_user = sheet_progress.cell(idx, col_user).value
+        if current_user and current_user != user and user not in ADMINS:
+            await update.message.reply_text("❌ Không có quyền undo")
             return
+
+        sheet_progress.update_cell(idx, col_bd, "")
+        sheet_progress.update_cell(idx, col_kt, "")
+        sheet_progress.update_cell(idx, col_user, "")
+        sheet_progress.update_cell(idx, col_ghichu, "")
+
+        await update.message.reply_text(f"✅ Undo {cmd_site}")
+        return
 
     await update.message.reply_text("❌ Không tìm thấy")
 
@@ -198,7 +230,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     col_user = col2num(COL_MAP[hangmuc]["USER"])
 
     rows = sheet_progress.get_all_values()
-    today = datetime.now().strftime("%d/%m")
+    today = now_vn().strftime("%d/%m")
 
     doing_list = []
     done_list = []
@@ -242,8 +274,8 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     rows = sheet_progress.get_all_values()
-    today = datetime.now().strftime("%d/%m")
-    now_full = datetime.now().strftime("%d/%m %H:%M")
+    today = now_vn().strftime("%d/%m")
+    now_full = now_vn().strftime("%d/%m %H:%M")
 
     total_sites = len(rows) - 2
     msg = f"📊 UPDATE TIẾN ĐỘ ({now_full})\n\n"
