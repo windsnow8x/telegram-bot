@@ -3,22 +3,20 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-
 from datetime import datetime
 import pytz
 import os, json
 import difflib
-import io
+import dropbox
 
 # ===== TIMEZONE VN =====
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
+
 def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "3.1 DEBUG")
+VERSION = os.getenv("BOT_VERSION", "3.0")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -29,14 +27,15 @@ log(f"🚀 START BOT - VERSION {VERSION}")
 # ===== CONFIG =====
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
-DRIVE_ROOT_FOLDER_ID = os.getenv("DRIVE_ROOT_FOLDER_ID")
+DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+
 ALLOWED_GROUP = -5229338785
 ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang"]
 
-if not TOKEN or not SHEET_ID or not DRIVE_ROOT_FOLDER_ID:
-    raise Exception("❌ Thiếu ENV")
+if not TOKEN or not SHEET_ID or not DROPBOX_TOKEN:
+    raise Exception("❌ Thiếu TOKEN / SHEET_ID / DROPBOX_TOKEN")
 
-# ===== GOOGLE =====
+# ===== GOOGLE SHEET =====
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -44,14 +43,28 @@ scope = [
 
 google_cred = os.getenv("GOOGLE_CRED")
 cred_dict = json.loads(google_cred)
-
 creds = Credentials.from_service_account_info(cred_dict, scopes=scope)
 client = gspread.authorize(creds)
+
 sheet_progress = client.open_by_key(SHEET_ID).worksheet("Progress")
+log("✅ Kết nối Google Sheet OK")
 
-drive_service = build('drive', 'v3', credentials=creds)
+# ===== DROPBOX =====
+dbx = dropbox.Dropbox(DROPBOX_TOKEN)
 
-log("✅ Google OK")
+def create_folder_if_not_exists(path):
+    try:
+        dbx.files_create_folder_v2(path)
+    except Exception as e:
+        if "conflict" not in str(e):
+            log(f"❌ Lỗi tạo folder: {e}")
+
+def upload_to_dropbox(file_bytes, path):
+    try:
+        dbx.files_upload(file_bytes, path)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
 
 # ===== CỘT =====
 COL_MAP = {
@@ -59,6 +72,10 @@ COL_MAP = {
     "CH": {"BD":"W", "KT":"X", "USER":"Y", "GHICHU":"Z"},
     "LD": {"BD":"AC", "KT":"AD", "USER":"AE", "GHICHU":"AF"},
     "CM": {"BD":"AI", "KT":"AJ", "USER":"AK", "GHICHU":"AL"},
+    "SW": {"BD":"AO", "KT":"AP", "USER":"AQ", "GHICHU":"AR"},
+    "OA": {"BD":"AU", "KT":"AV", "USER":"AW", "GHICHU":"AX"},
+    "TD": {"BD":"BA", "KT":"BB", "USER":"BC", "GHICHU":"BD"},
+    "TH": {"BD":"BG", "KT":"BH", "USER":"BI", "GHICHU":"BJ"},
 }
 
 def col2num(col):
@@ -67,51 +84,10 @@ def col2num(col):
         num = num*26 + (ord(c.upper()) - ord("A")) + 1
     return num
 
-# ===== PENDING =====
+# ===== PENDING UPLOAD =====
 pending_upload = {}
-PENDING_TIMEOUT = 5 * 60
+PENDING_TIMEOUT = 5  # phút
 MAX_UPLOAD = 5
-
-# ===== DRIVE =====
-def get_or_create_folder(name, parent_id):
-    try:
-        log(f"🔍 Check folder: {name}")
-        query = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and '{parent_id}' in parents and trashed=false"
-        res = drive_service.files().list(q=query, fields="files(id)").execute()
-        files = res.get("files", [])
-
-        if files:
-            log(f"📁 Folder tồn tại: {name}")
-            return files[0]["id"]
-
-        log(f"📁 Tạo folder mới: {name}")
-        file_metadata = {
-            "name": name,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [parent_id]
-        }
-        file = drive_service.files().create(body=file_metadata, fields="id").execute()
-        return file["id"]
-
-    except Exception as e:
-        log(f"❌ Lỗi folder: {e}")
-        raise
-
-def upload_file(file_bytes, filename, folder_id):
-    try:
-        log(f"⬆️ Upload file: {filename}")
-        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg')
-
-        drive_service.files().create(
-            body={"name": filename, "parents":[folder_id]},
-            media_body=media
-        ).execute()
-
-        log("✅ Upload thành công")
-
-    except Exception as e:
-        log(f"❌ Lỗi upload: {e}")
-        raise
 
 # ===== HANDLE =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,12 +97,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user.full_name
     user_id = update.effective_user.id
-
     text = update.message.text.strip() if update.message.text else ""
-
-    log(f"👤 USER: {user}")
-    log(f"💬 TEXT: {text}")
-    log(f"🖼️ PHOTO: {bool(update.message.photo)}")
 
     if chat_id != ALLOWED_GROUP and user not in ADMINS:
         return
@@ -135,80 +106,81 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sites_upper = [s.strip().upper() for s in sites if s.strip()]
 
     # ===== PIC COMMAND =====
-    if text and text.upper().endswith("_PIC"):
-        try:
-            cmd = text.upper().split("_")
+    if text.upper().endswith("_PIC"):
+        cmd = text.upper().split("_")
+        hangmuc = cmd[-2]
+        site_name = "_".join(cmd[:-2])
 
-            hangmuc = cmd[-2]
-            site_name = "_".join(cmd[:-2])
+        if site_name not in sites_upper:
+            close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
+            await update.message.reply_text(f"❌ Không tìm thấy site. Gợi ý: {', '.join(close)}" if close else "❌ Không tìm thấy site")
+            return
 
-            if site_name not in sites_upper:
-                await update.message.reply_text("❌ Không tìm thấy site")
-                return
+        if user_id in pending_upload:
+            await update.message.reply_text("❌ Bạn đang có lệnh upload đang chờ")
+            return
 
-            if user_id in pending_upload:
-                await update.message.reply_text("❌ Bạn đang có lệnh pending")
-                return
+        pending_upload[user_id] = {
+            "site": site_name,
+            "hangmuc": hangmuc,
+            "time": now_vn(),
+            "count": 0
+        }
 
-            pending_upload[user_id] = {
-                "site": site_name,
-                "hangmuc": hangmuc,
-                "time": now_vn(),
-                "count": 0
-            }
-
-            await update.message.reply_text(f"📸 Đã nhận lệnh upload {site_name} | {hangmuc}")
-            log("✅ Tạo pending thành công")
-
-        except Exception as e:
-            log(f"❌ Lỗi PIC command: {e}")
-            await update.message.reply_text(f"❌ Lỗi PIC: {e}")
-
+        await update.message.reply_text(f"📸 Chờ upload ảnh {site_name} | {hangmuc} (tối đa 5 ảnh trong 5 phút)")
         return
 
     # ===== RECEIVE PHOTO =====
     if update.message.photo:
+        if user_id not in pending_upload:
+            await update.message.reply_text("❌ Chưa có lệnh _PIC")
+            return
+
+        pend = pending_upload[user_id]
+        now = now_vn()
+
+        if (now - pend["time"]).total_seconds() > PENDING_TIMEOUT * 60:
+            del pending_upload[user_id]
+            await update.message.reply_text("❌ Hết thời gian upload")
+            return
+
+        if pend["count"] >= MAX_UPLOAD:
+            await update.message.reply_text("❌ Đã đủ 5 ảnh")
+            return
+
+        await update.message.reply_text("⏳ Đang upload Dropbox...")
+
         try:
-            if user_id not in pending_upload:
-                await update.message.reply_text("❌ Chưa có lệnh _PIC")
-                return
-
-            pend = pending_upload[user_id]
-
-            if (now_vn() - pend["time"]).total_seconds() > PENDING_TIMEOUT:
-                del pending_upload[user_id]
-                await update.message.reply_text("❌ Hết thời gian upload")
-                return
-
-            if pend["count"] >= MAX_UPLOAD:
-                await update.message.reply_text("❌ Đã đủ 5 ảnh")
-                return
-
             file = await update.message.photo[-1].get_file()
             file_bytes = await file.download_as_bytearray()
 
             pend["count"] += 1
 
-            await update.message.reply_text("⏳ Đang upload lên Drive...")
+            site = pend["site"]
+            hangmuc = pend["hangmuc"]
 
-            # ===== DRIVE FLOW =====
-            folder_site = get_or_create_folder(pend["site"], DRIVE_ROOT_FOLDER_ID)
-            folder_hm = get_or_create_folder(pend["hangmuc"], folder_site)
+            create_folder_if_not_exists(f"/{site}")
+            create_folder_if_not_exists(f"/{site}/{hangmuc}")
 
-            filename = f"{now_vn().strftime('%d%m_%H%M%S')}_{pend['count']}.jpg"
+            filename = f"{now.strftime('%d%m')}_{hangmuc}_{pend['count']}_{site}.jpg"
+            path = f"/{site}/{hangmuc}/{filename}"
 
-            upload_file(file_bytes, filename, folder_hm)
+            success, msg = upload_to_dropbox(file_bytes, path)
 
-            await update.message.reply_text(f"✅ Upload thành công {pend['count']}/5")
+            if success:
+                await update.message.reply_text(f"✅ Upload {pend['count']}/5 OK")
+            else:
+                await update.message.reply_text(f"❌ Upload lỗi: {msg}")
+                log(msg)
 
         except Exception as e:
-            log(f"❌ Lỗi upload tổng: {e}")
-            await update.message.reply_text(f"❌ Upload lỗi: {e}")
+            await update.message.reply_text(f"❌ Lỗi xử lý ảnh: {e}")
+            log(e)
 
         return
 
-    # ===== SHEET (GIỮ NGUYÊN) =====
-    if not text or "_" not in text:
+    # ===== TEXT COMMAND (SHEET) =====
+    if "_" not in text or text.upper().endswith("_PIC"):
         return
 
     parts = text.split(" ", 1)
@@ -244,43 +216,54 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bd_val = sheet_progress.cell(idx, col_bd).value
         kt_val = sheet_progress.cell(idx, col_kt).value
 
+        # ===== BD =====
         if action == "BD":
             if bd_val:
-                await update.message.reply_text("Đã BD")
+                await update.message.reply_text(f"{sheet_site} đã BD trước đó")
                 return
+
             sheet_progress.update_cell(idx, col_bd, now_str)
+
             if not kt_val:
                 sheet_progress.update_cell(idx, col_user, user)
-            await update.message.reply_text("BD OK")
 
+            await update.message.reply_text(f"{cmd_site} BẮT ĐẦU OK")
+
+        # ===== KT =====
         elif action == "KT":
             if kt_val:
-                await update.message.reply_text("Đã KT")
+                await update.message.reply_text(f"{sheet_site} đã KT trước đó")
                 return
+
             sheet_progress.update_cell(idx, col_kt, now_str)
             sheet_progress.update_cell(idx, col_user, user)
-            await update.message.reply_text("KT OK")
 
+            await update.message.reply_text(f"{cmd_site} KẾT THÚC OK")
+
+        # ===== NOTE =====
         elif note_content:
-            old = sheet_progress.cell(idx, col_ghichu).value
-            new = f"[{now_vn().strftime('%d/%m')}]: {note_content}"
-            sheet_progress.update_cell(idx, col_ghichu, f"{old}\n{new}" if old else new)
-            await update.message.reply_text("✅ Ghi chú OK")
+            old_note = sheet_progress.cell(idx, col_ghichu).value
+            new_note = f"[{now_vn().strftime('%d/%m')}]: {note_content}"
+            combined = f"{old_note}\n{new_note}" if old_note else new_note
+
+            sheet_progress.update_cell(idx, col_ghichu, combined)
+            await update.message.reply_text("✅ Đã ghi chú")
 
         found = True
         break
 
     if not found:
-        close = difflib.get_close_matches(site_name, sites_upper, n=3)
-        await update.message.reply_text(f"❌ Không tìm thấy. Gợi ý: {', '.join(close)}" if close else "❌ Không tìm thấy")
+        close_matches = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
+        await update.message.reply_text(f"❌ Không tìm thấy site. Gợi ý: {', '.join(close_matches)}" if close_matches else "❌ Không tìm thấy site")
 
-# ===== RESET =====
+# ===== RESET PENDING =====
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.full_name
     if user not in ADMINS:
         return
+
     pending_upload.clear()
-    await update.message.reply_text("✅ Đã reset pending")
+    await update.message.reply_text("✅ Đã reset toàn bộ pending")
 
 # ===== RUN =====
 app = ApplicationBuilder().token(TOKEN).build()
