@@ -18,7 +18,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "5.0")
+VERSION = os.getenv("BOT_VERSION", "3.1 DEBUG")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -29,7 +29,7 @@ log(f"🚀 START BOT - VERSION {VERSION}")
 # ===== CONFIG =====
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
-DRIVE_ROOT_FOLDER_ID = os.getenv("DRIVE_ROOT_FOLDER_ID")  # 👉 folder gốc trên Drive
+DRIVE_ROOT_FOLDER_ID = os.getenv("DRIVE_ROOT_FOLDER_ID")
 ALLOWED_GROUP = -5229338785
 ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang"]
 
@@ -74,26 +74,44 @@ MAX_UPLOAD = 5
 
 # ===== DRIVE =====
 def get_or_create_folder(name, parent_id):
-    query = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and '{parent_id}' in parents and trashed=false"
-    res = drive_service.files().list(q=query, fields="files(id)").execute()
-    files = res.get("files", [])
-    if files:
-        return files[0]["id"]
+    try:
+        log(f"🔍 Check folder: {name}")
+        query = f"mimeType='application/vnd.google-apps.folder' and name='{name}' and '{parent_id}' in parents and trashed=false"
+        res = drive_service.files().list(q=query, fields="files(id)").execute()
+        files = res.get("files", [])
 
-    file_metadata = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id]
-    }
-    file = drive_service.files().create(body=file_metadata, fields="id").execute()
-    return file["id"]
+        if files:
+            log(f"📁 Folder tồn tại: {name}")
+            return files[0]["id"]
+
+        log(f"📁 Tạo folder mới: {name}")
+        file_metadata = {
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id]
+        }
+        file = drive_service.files().create(body=file_metadata, fields="id").execute()
+        return file["id"]
+
+    except Exception as e:
+        log(f"❌ Lỗi folder: {e}")
+        raise
 
 def upload_file(file_bytes, filename, folder_id):
-    media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg')
-    drive_service.files().create(
-        body={"name": filename, "parents":[folder_id]},
-        media_body=media
-    ).execute()
+    try:
+        log(f"⬆️ Upload file: {filename}")
+        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg')
+
+        drive_service.files().create(
+            body={"name": filename, "parents":[folder_id]},
+            media_body=media
+        ).execute()
+
+        log("✅ Upload thành công")
+
+    except Exception as e:
+        log(f"❌ Lỗi upload: {e}")
+        raise
 
 # ===== HANDLE =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -106,6 +124,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip() if update.message.text else ""
 
+    log(f"👤 USER: {user}")
+    log(f"💬 TEXT: {text}")
+    log(f"🖼️ PHOTO: {bool(update.message.photo)}")
+
     if chat_id != ALLOWED_GROUP and user not in ADMINS:
         return
 
@@ -114,66 +136,78 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== PIC COMMAND =====
     if text and text.upper().endswith("_PIC"):
-        cmd = text.upper().split("_")
+        try:
+            cmd = text.upper().split("_")
 
-        if len(cmd) < 3:
-            await update.message.reply_text("❌ Sai cú pháp _PIC")
-            return
+            hangmuc = cmd[-2]
+            site_name = "_".join(cmd[:-2])
 
-        hangmuc = cmd[-2]
-        site_name = "_".join(cmd[:-2])
+            if site_name not in sites_upper:
+                await update.message.reply_text("❌ Không tìm thấy site")
+                return
 
-        if site_name not in sites_upper:
-            await update.message.reply_text("❌ Không tìm thấy site")
-            return
+            if user_id in pending_upload:
+                await update.message.reply_text("❌ Bạn đang có lệnh pending")
+                return
 
-        if user_id in pending_upload:
-            await update.message.reply_text("❌ Bạn đang có lệnh pending")
-            return
+            pending_upload[user_id] = {
+                "site": site_name,
+                "hangmuc": hangmuc,
+                "time": now_vn(),
+                "count": 0
+            }
 
-        pending_upload[user_id] = {
-            "site": site_name,
-            "hangmuc": hangmuc,
-            "time": now_vn(),
-            "count": 0
-        }
+            await update.message.reply_text(f"📸 Đã nhận lệnh upload {site_name} | {hangmuc}")
+            log("✅ Tạo pending thành công")
 
-        await update.message.reply_text(f"📸 Đã nhận lệnh upload {site_name} | {hangmuc} (tối đa 5 ảnh trong 5 phút)")
+        except Exception as e:
+            log(f"❌ Lỗi PIC command: {e}")
+            await update.message.reply_text(f"❌ Lỗi PIC: {e}")
+
         return
 
     # ===== RECEIVE PHOTO =====
     if update.message.photo:
-        if user_id not in pending_upload:
-            return
+        try:
+            if user_id not in pending_upload:
+                await update.message.reply_text("❌ Chưa có lệnh _PIC")
+                return
 
-        pend = pending_upload[user_id]
+            pend = pending_upload[user_id]
 
-        if (now_vn() - pend["time"]).total_seconds() > PENDING_TIMEOUT:
-            del pending_upload[user_id]
-            await update.message.reply_text("❌ Hết thời gian upload")
-            return
+            if (now_vn() - pend["time"]).total_seconds() > PENDING_TIMEOUT:
+                del pending_upload[user_id]
+                await update.message.reply_text("❌ Hết thời gian upload")
+                return
 
-        if pend["count"] >= MAX_UPLOAD:
-            await update.message.reply_text("❌ Đã đủ 5 ảnh")
-            return
+            if pend["count"] >= MAX_UPLOAD:
+                await update.message.reply_text("❌ Đã đủ 5 ảnh")
+                return
 
-        file = await update.message.photo[-1].get_file()
-        file_bytes = await file.download_as_bytearray()
+            file = await update.message.photo[-1].get_file()
+            file_bytes = await file.download_as_bytearray()
 
-        pend["count"] += 1
+            pend["count"] += 1
 
-        # tạo folder
-        folder_site = get_or_create_folder(pend["site"], DRIVE_ROOT_FOLDER_ID)
-        folder_hm = get_or_create_folder(pend["hangmuc"], folder_site)
+            await update.message.reply_text("⏳ Đang upload lên Drive...")
 
-        filename = f"{now_vn().strftime('%d%m')}_{pend['count']}.jpg"
+            # ===== DRIVE FLOW =====
+            folder_site = get_or_create_folder(pend["site"], DRIVE_ROOT_FOLDER_ID)
+            folder_hm = get_or_create_folder(pend["hangmuc"], folder_site)
 
-        upload_file(file_bytes, filename, folder_hm)
+            filename = f"{now_vn().strftime('%d%m_%H%M%S')}_{pend['count']}.jpg"
 
-        await update.message.reply_text(f"✅ Upload {pend['count']}/5")
+            upload_file(file_bytes, filename, folder_hm)
+
+            await update.message.reply_text(f"✅ Upload thành công {pend['count']}/5")
+
+        except Exception as e:
+            log(f"❌ Lỗi upload tổng: {e}")
+            await update.message.reply_text(f"❌ Upload lỗi: {e}")
+
         return
 
-    # ===== SHEET LOGIC (GIỮ NGUYÊN) =====
+    # ===== SHEET (GIỮ NGUYÊN) =====
     if not text or "_" not in text:
         return
 
