@@ -14,7 +14,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "7.3")
+VERSION = os.getenv("BOT_VERSION", "7.6")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -28,7 +28,7 @@ SHEET_ID = os.getenv("SHEET_ID")
 DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
 
 ALLOWED_GROUP = -5229338785
-ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang"]
+ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang", "Mai Trang"]
 
 if not TOKEN or not SHEET_ID or not DROPBOX_TOKEN:
     raise Exception("❌ Thiếu ENV")
@@ -75,11 +75,7 @@ def clear_cache():
 COL_MAP = {
     "KS": {"BD":"Q", "KT":"R", "USER":"S", "GHICHU":"T"},
     "LD": {"BD":"AC", "KT":"AD", "USER":"AE", "GHICHU":"AF"},
-    "CH": {"BD":"AG", "KT":"AH", "USER":"AI", "GHICHU":"AJ"},
-    "CM": {"BD":"AK", "KT":"AL", "USER":"AM", "GHICHU":"AN"},
-    "OA": {"BD":"AO", "KT":"AP", "USER":"AQ", "GHICHU":"AR"},
-    "TD": {"BD":"AS", "KT":"AT", "USER":"AU", "GHICHU":"AV"},
-    "TH": {"BD":"AW", "KT":"AX", "USER":"AY", "GHICHU":"AZ"},
+    "CM": {"BD":"AI", "KT":"AJ", "USER":"AK", "GHICHU":"AL"},
 }
 
 def col2num(col):
@@ -91,21 +87,17 @@ def col2num(col):
 # ===== PENDING UPLOAD =====
 pending_upload = {}
 MAX_UPLOAD = 5
-TIMEOUT = 5
+TIMEOUT = 5  # phút
 
-# ===== HANDLE (GIỮ NGUYÊN) =====
+# ===== HANDLE =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
-        return
-
-    text = update.message.text.strip() if update.message.text else ""
-
-    if text.startswith("/"):
         return
 
     chat_id = update.effective_chat.id
     user = update.effective_user.full_name
     user_id = update.effective_user.id
+    text = update.message.text.strip() if update.message.text else ""
 
     if chat_id != ALLOWED_GROUP and user not in ADMINS:
         return
@@ -113,7 +105,75 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sites = sheet_progress.col_values(4)
     sites_upper = [s.strip().upper() for s in sites if s.strip()]
 
-    if "_" not in text:
+    # ================= PIC COMMAND =================
+    if text.upper().endswith("_PIC"):
+        cmd = text.upper().split("_")
+
+        if len(cmd) < 3:
+            return
+
+        hangmuc = cmd[-2]
+        site_name = "_".join(cmd[:-2])
+
+        if site_name not in sites_upper:
+            await update.message.reply_text("❌ Không tìm thấy site")
+            return
+
+        pending_upload[user_id] = {
+            "site": site_name,
+            "hangmuc": hangmuc,
+            "time": now_vn(),
+            "count": 0
+        }
+
+        await update.message.reply_text(f"📸 Chờ upload {site_name} | {hangmuc} (5 ảnh / 5 phút)")
+        return
+
+    # ================= RECEIVE PHOTO =================
+    if update.message.photo:
+        if user_id not in pending_upload:
+            await update.message.reply_text("❌ Chưa có lệnh _PIC")
+            return
+
+        pend = pending_upload[user_id]
+        now = now_vn()
+
+        # timeout
+        if (now - pend["time"]).total_seconds() > TIMEOUT*60:
+            del pending_upload[user_id]
+            await update.message.reply_text("❌ Hết hạn upload")
+            return
+
+        if pend["count"] >= MAX_UPLOAD:
+            await update.message.reply_text("❌ Đã đủ 5 ảnh")
+            return
+
+        try:
+            await update.message.reply_text("⏳ Đang upload Dropbox...")
+
+            file = await update.message.photo[-1].get_file()
+            file_bytes = await file.download_as_bytearray()
+            file_bytes = bytes(file_bytes)
+
+            pend["count"] += 1
+
+            filename = f"{now.strftime('%d%m')}_{pend['hangmuc']}_{pend['count']}.jpg"
+            dropbox_path = f"/{pend['site']}/{pend['hangmuc']}/{filename}"
+
+            log(f"UPLOAD: {dropbox_path}")
+
+            dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+
+            await update.message.reply_text(f"✅ Upload {pend['count']}/5")
+
+        except Exception as e:
+            log(f"ERROR: {e}")
+            await update.message.reply_text(f"❌ Upload lỗi: {e}")
+
+        return
+
+    # ================= UPDATE SHEET =================
+    if text.startswith("/") or "_" not in text:
         return
 
     parts = text.split(" ", 1)
@@ -165,12 +225,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "BD":
             sheet_progress.update_cell(idx, col_bd, now_str)
             sheet_progress.update_cell(idx, col_user, user)
-
-            if note:
-                old = sheet_progress.cell(idx, col_note).value
-                new = f"[{now_vn().strftime('%d/%m')}]: {note}"
-                sheet_progress.update_cell(idx, col_note, f"{old}\n{new}" if old else new)
-
             clear_cache()
             await update.message.reply_text("✅ BD OK")
             return
@@ -178,102 +232,66 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # KT
         elif action == "KT":
             sheet_progress.update_cell(idx, col_kt, now_str)
-
-            if note:
-                old = sheet_progress.cell(idx, col_note).value
-                new = f"[{now_vn().strftime('%d/%m')}]: {note}"
-                sheet_progress.update_cell(idx, col_note, f"{old}\n{new}" if old else new)
-
             clear_cache()
             await update.message.reply_text("✅ KT OK")
             return
 
     close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
-    await update.message.reply_text(f"❌ Không thấy site. Gợi ý: {', '.join(close)}")
-
-# ===== UNDO (NEW) =====
-async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.full_name
-
-    if user not in ADMINS:
-        return
-
-    if not context.args:
-        await update.message.reply_text("Dùng: /undo SITE_HM")
-        return
-
-    cmd_text = context.args[0].upper()
-    cmd = cmd_text.split("_")
-
-    if len(cmd) < 2:
-        return
-
-    hangmuc = cmd[-1]
-    site_name = "_".join(cmd[:-1])
-
-    if hangmuc not in COL_MAP:
-        if len(cmd) < 3:
-            return
-        hangmuc = cmd[-2]
-        site_name = "_".join(cmd[:-2])
-
-    if hangmuc not in COL_MAP:
-        await update.message.reply_text("❌ Sai hạng mục")
-        return
-
-    sites = sheet_progress.col_values(4)
-
-    for idx, sheet_site in enumerate(sites, start=1):
-        if sheet_site.strip().upper() != site_name:
-            continue
-
-        cols = COL_MAP[hangmuc]
-
-        sheet_progress.update_cell(idx, col2num(cols["BD"]), "")
-        sheet_progress.update_cell(idx, col2num(cols["KT"]), "")
-        sheet_progress.update_cell(idx, col2num(cols["USER"]), "")
-        sheet_progress.update_cell(idx, col2num(cols["GHICHU"]), "")
-
-        clear_cache()
-        await update.message.reply_text(f"✅ Undo {site_name}_{hangmuc}")
-        return
-
-    await update.message.reply_text("❌ Không tìm thấy site")
+    await update.message.reply_text(f"❌ Sai site. Gợi ý: {', '.join(close)}")
 
 # ===== STATUS =====
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.full_name not in ADMINS:
         return
 
+    if not context.args:
+        await update.message.reply_text("Dùng: /status KS")
+        return
+
+    hm = context.args[0].upper()
+
+    if hm not in COL_MAP:
+        await update.message.reply_text("❌ Sai hạng mục")
+        return
+
     rows = get_sheet_data()
     today = now_vn().strftime("%d/%m")
     total = len(rows) - 2
 
-    msg = f"📊 STATUS ({today})\n\n"
+    cols = COL_MAP[hm]
+    col_bd = col2num(cols["BD"])
+    col_kt = col2num(cols["KT"])
+    col_user = col2num(cols["USER"])
 
-    for hangmuc, cols in COL_MAP.items():
-        col_bd = col2num(cols["BD"])
-        col_kt = col2num(cols["KT"])
+    done_today, done_total = 0, 0
+    doing_list, done_list = [], []
 
-        doing = 0
-        done_today = 0
-        done_total = 0
+    for row in rows[2:]:
+        if len(row) < col_kt:
+            continue
 
-        for row in rows[2:]:
-            if len(row) < col_kt:
-                continue
+        site = row[3]
+        bd = row[col_bd-1]
+        kt = row[col_kt-1]
+        user = row[col_user-1] if len(row) >= col_user else ""
 
-            bd = row[col_bd-1]
-            kt = row[col_kt-1]
+        if kt:
+            done_total += 1
+            if today in kt:
+                done_today += 1
+                done_list.append((site, user, kt))
+        elif bd and today in bd:
+            doing_list.append((site, user, bd))
 
-            if kt:
-                done_total += 1
-                if today in kt:
-                    done_today += 1
-            elif bd and today in bd:
-                doing += 1
+    msg = f"📊 {hm} HÔM NAY ({today})\n\n"
+    msg += f"📌 Hoàn thành hôm nay: {done_today}/{total}\n"
+    msg += f"📌 Lũy kế: {done_total}/{total}\n\n"
 
-        msg += f"{hangmuc}: 🟡 {doing} | ✅ {done_today}/{done_total}/{total}\n"
+    msg += "✅ HOÀN THÀNH\n"
+    msg += "\n".join([f"{s} | ✅ {u or 'N/A'} ({t})" for s,u,t in done_list]) or "Không có"
+
+    msg += "\n\n🟡 ĐANG LÀM\n"
+    msg += "\n".join([f"{s} | 🟡 {u or 'N/A'} ({t})" for s,u,t in doing_list]) or "Không có"
 
     await update.message.reply_text(msg)
 
@@ -308,11 +326,47 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
-# ===== RESET =====
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.full_name not in ADMINS:
+# ===== UNDO =====
+async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user.full_name
+
+    if user not in ADMINS:
         return
 
+    if not context.args:
+        await update.message.reply_text("Dùng: /undo SITE_HM")
+        return
+
+    cmd = context.args[0].upper().split("_")
+
+    if len(cmd) < 2:
+        return
+
+    hm = cmd[-1]
+    site_name = "_".join(cmd[:-1])
+
+    if hm not in COL_MAP:
+        return
+
+    sites = sheet_progress.col_values(4)
+
+    for idx, s in enumerate(sites, start=1):
+        if s.strip().upper() != site_name:
+            continue
+
+        cols = COL_MAP[hm]
+
+        sheet_progress.update_cell(idx, col2num(cols["BD"]), "")
+        sheet_progress.update_cell(idx, col2num(cols["KT"]), "")
+        sheet_progress.update_cell(idx, col2num(cols["USER"]), "")
+        sheet_progress.update_cell(idx, col2num(cols["GHICHU"]), "")
+
+        clear_cache()
+        await update.message.reply_text(f"✅ Undo {site_name}_{hm}")
+        return
+
+# ===== RESET =====
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_upload.clear()
     await update.message.reply_text("✅ Reset pending")
 
@@ -324,7 +378,7 @@ app.add_handler(CommandHandler("report", report))
 app.add_handler(CommandHandler("undo", undo))
 app.add_handler(CommandHandler("reset", reset))
 
-app.add_handler(MessageHandler(filters.TEXT, handle))
+app.add_handler(MessageHandler(filters.ALL, handle))
 
 if __name__ == "__main__":
     log("Bot đang chạy...")
