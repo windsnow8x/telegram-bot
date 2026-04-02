@@ -14,7 +14,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "7.0")
+VERSION = os.getenv("BOT_VERSION", "7.1")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -28,7 +28,7 @@ SHEET_ID = os.getenv("SHEET_ID")
 DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
 
 ALLOWED_GROUP = -5229338785
-ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang"]
+ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang", "Mai Trang"]
 
 if not TOKEN or not SHEET_ID or not DROPBOX_TOKEN:
     raise Exception("❌ Thiếu ENV")
@@ -150,6 +150,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Hết hạn")
             return
 
+        if pend["count"] >= MAX_UPLOAD:
+            await update.message.reply_text("❌ Đã đủ 5 ảnh")
+            return
+
         file = await update.message.photo[-1].get_file()
         file_bytes = bytes(await file.download_as_bytearray())
 
@@ -169,12 +173,21 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note = parts[1] if len(parts) > 1 else ""
 
     cmd = cmd_site.split("_")
-    if len(cmd) < 3:
+
+    if len(cmd) < 2:
         return
 
-    hangmuc = cmd[-2]
-    action = cmd[-1]
-    site_name = "_".join(cmd[:-2])
+    # ===== FIX PARSE (QUAN TRỌNG) =====
+    hangmuc = cmd[-1]
+    site_name = "_".join(cmd[:-1])
+    action = None
+
+    if hangmuc not in COL_MAP:
+        if len(cmd) < 3:
+            return
+        hangmuc = cmd[-2]
+        action = cmd[-1]
+        site_name = "_".join(cmd[:-2])
 
     if hangmuc not in COL_MAP:
         await update.message.reply_text("❌ Sai hạng mục")
@@ -185,31 +198,54 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         cols = COL_MAP[hangmuc]
+
+        col_bd = col2num(cols["BD"])
+        col_kt = col2num(cols["KT"])
+        col_user = col2num(cols["USER"])
+        col_note = col2num(cols["GHICHU"])
+
         now_str = now_vn().strftime("%d/%m %H:%M")
 
-        # ===== NOTE =====
-        if note:
-            old = sheet_progress.cell(idx, col2num(cols["GHICHU"])).value
+        # ===== NOTE ONLY =====
+        if note and not action:
+            old = sheet_progress.cell(idx, col_note).value
             new = f"[{now_vn().strftime('%d/%m')}]: {note}"
-            sheet_progress.update_cell(idx, col2num(cols["GHICHU"]), f"{old}\n{new}" if old else new)
+            combined = f"{old}\n{new}" if old else new
+            sheet_progress.update_cell(idx, col_note, combined)
             clear_cache()
             await update.message.reply_text("✅ Đã ghi chú")
             return
 
         # ===== BD =====
         if action == "BD":
-            sheet_progress.update_cell(idx, col2num(cols["BD"]), now_str)
-            sheet_progress.update_cell(idx, col2num(cols["USER"]), user)
+            sheet_progress.update_cell(idx, col_bd, now_str)
+            sheet_progress.update_cell(idx, col_user, user)
+
+            if note:
+                old = sheet_progress.cell(idx, col_note).value
+                new = f"[{now_vn().strftime('%d/%m')}]: {note}"
+                combined = f"{old}\n{new}" if old else new
+                sheet_progress.update_cell(idx, col_note, combined)
+
             clear_cache()
+            await update.message.reply_text("✅ BD OK")
+            return
 
         # ===== KT =====
         elif action == "KT":
-            sheet_progress.update_cell(idx, col2num(cols["KT"]), now_str)
+            sheet_progress.update_cell(idx, col_kt, now_str)
+
+            if note:
+                old = sheet_progress.cell(idx, col_note).value
+                new = f"[{now_vn().strftime('%d/%m')}]: {note}"
+                combined = f"{old}\n{new}" if old else new
+                sheet_progress.update_cell(idx, col_note, combined)
+
             clear_cache()
+            await update.message.reply_text("✅ KT OK")
+            return
 
-        await update.message.reply_text("✅ OK")
-        return
-
+    # ===== NOT FOUND =====
     close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
     await update.message.reply_text(f"❌ Không thấy site. Gợi ý: {', '.join(close)}")
 
