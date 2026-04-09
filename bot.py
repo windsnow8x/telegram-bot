@@ -15,7 +15,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "8.1")
+VERSION = os.getenv("BOT_VERSION", "8.2")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -27,7 +27,6 @@ log(f"🚀 START BOT - VERSION {VERSION}")
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
 
-# DROPBOX NEW
 DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
 DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
 DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
@@ -113,39 +112,9 @@ def clear_cache():
     global cache_data
     cache_data = None
 
-# ===== CỘT =====
-COL_MAP = {
-    "KS": {"BD":"Q", "KT":"R", "USER":"S", "GHICHU":"T"},
-    "LD": {"BD":"AC", "KT":"AD", "USER":"AE", "GHICHU":"AF"},
-    "CM": {"BD":"AI", "KT":"AJ", "USER":"AK", "GHICHU":"AL"},
-    "CH": {"BD":"AP", "KT":"AQ", "USER":"AR", "GHICHU":"AS"},
-    "SW": {"BD":"AT", "KT":"AU", "USER":"AV", "GHICHU":"AW"},
-    "OA": {"BD":"AX", "KT":"AY", "USER":"AZ", "GHICHU":"BA"},
-    "TD": {"BD":"BB", "KT":"BC", "USER":"BD", "GHICHU":"BE"},
-    "TH": {"BD":"BF", "KT":"BG", "USER":"BH", "GHICHU":"BI"},
-}
-
-HM_DISPLAY = {
-    "KS": "Survey",
-    "CH": "Delivery",
-    "LD": "Installation",
-    "CM": "Commiss",
-    "SW": "Swap",
-    "OA": "On-Air",
-    "TD": "Dismantle",
-    "TH": "Return"
-}
-
-def col2num(col):
-    num = 0
-    for c in col:
-        num = num*26 + (ord(c.upper()) - ord("A")) + 1
-    return num
-
 # ===== PENDING UPLOAD =====
 pending_upload = {}
 MAX_UPLOAD = 5
-TIMEOUT = 5
 
 # ===== HANDLE =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -179,7 +148,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "site": site_name,
             "hangmuc": hangmuc,
             "time": now_vn(),
-            "count": 0
+            "last_update": now_vn(),
+            "count": 0,
+            "msg_id": None,
+            "chat_id": chat_id
         }
 
         await update.message.reply_text(f"📸 Chờ upload {site_name} | {hangmuc}")
@@ -195,13 +167,17 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         now = now_vn()
 
         try:
-            await update.message.reply_text("⏳ Upload Dropbox...")
+            # Tạo message 1 lần
+            if not pend["msg_id"]:
+                msg = await update.message.reply_text(f"📤 Uploading...\n0/{MAX_UPLOAD} ảnh")
+                pend["msg_id"] = msg.message_id
 
             file = await update.message.photo[-1].get_file()
             file_bytes = await file.download_as_bytearray()
             file_bytes = bytes(file_bytes)
 
             pend["count"] += 1
+            pend["last_update"] = now_vn()
 
             filename = f"{now.strftime('%d%m')}_{pend['hangmuc']}_{pend['count']}.jpg"
             dropbox_path = f"/MBF HW/{pend['site']}/{pend['hangmuc']}/{filename}"
@@ -209,7 +185,21 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dbx_client = get_dropbox_client()
             dbx_client.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
 
-            await update.message.reply_text(f"✅ Upload {pend['count']}/5")
+            # Update message duy nhất
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=pend["msg_id"],
+                text=f"📤 Uploading...\n{pend['count']}/{MAX_UPLOAD} ảnh"
+            )
+
+            # Nếu đủ 5 ảnh → kết thúc luôn
+            if pend["count"] == MAX_UPLOAD:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=pend["msg_id"],
+                    text=f"✅ Upload xong {MAX_UPLOAD}/{MAX_UPLOAD} ảnh"
+                )
+                del pending_upload[user_id]
 
         except Exception as e:
             log(f"ERROR: {e}")
@@ -217,9 +207,32 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
+# ===== AUTO TIMEOUT CHECK =====
+async def check_timeout(context: ContextTypes.DEFAULT_TYPE):
+    now = now_vn()
+    remove_list = []
+
+    for user_id, pend in pending_upload.items():
+        if (now - pend["last_update"]).total_seconds() > 60:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=pend["chat_id"],
+                    message_id=pend["msg_id"],
+                    text=f"✅ Upload xong {pend['count']}/{MAX_UPLOAD} ảnh"
+                )
+            except:
+                pass
+            remove_list.append(user_id)
+
+    for uid in remove_list:
+        del pending_upload[uid]
+
 # ===== RUN =====
 app = ApplicationBuilder().token(TOKEN).build()
 app.add_handler(MessageHandler(filters.ALL, handle))
+
+# chạy check timeout mỗi 30s
+app.job_queue.run_repeating(check_timeout, interval=30, first=30)
 
 if __name__ == "__main__":
     log("Bot đang chạy...")
