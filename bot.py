@@ -3,9 +3,10 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import os, json, difflib, dropbox
+import requests
 
 # ===== TIMEZONE VN =====
 VN_TZ = pytz.timezone("Asia/Ho_Chi_Minh")
@@ -14,7 +15,7 @@ def now_vn():
     return datetime.now(VN_TZ)
 
 # ===== VERSION =====
-VERSION = os.getenv("BOT_VERSION", "8.0")
+VERSION = os.getenv("BOT_VERSION", "8.1")
 
 def log(msg):
     now = now_vn().strftime("%d/%m %H:%M:%S")
@@ -25,13 +26,20 @@ log(f"🚀 START BOT - VERSION {VERSION}")
 # ===== CONFIG =====
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
-DROPBOX_TOKEN = os.getenv("DROPBOX_TOKEN")
+
+# DROPBOX NEW
+DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY")
+DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET")
+DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN")
 
 ALLOWED_GROUP = -5229338785
 ADMINS = ["Ngoc Anh", "Admin BOT", "MBF BOT", "Le Giang", "Mai Trang"]
 
-if not TOKEN or not SHEET_ID or not DROPBOX_TOKEN:
+if not TOKEN or not SHEET_ID:
     raise Exception("❌ Thiếu ENV")
+
+if not DROPBOX_APP_KEY or not DROPBOX_APP_SECRET or not DROPBOX_REFRESH_TOKEN:
+    raise Exception("❌ Thiếu ENV Dropbox")
 
 # ===== GOOGLE SHEET =====
 scope = [
@@ -47,8 +55,44 @@ sheet_progress = client.open_by_key(SHEET_ID).worksheet("Progress")
 
 log("✅ Sheet OK")
 
-# ===== DROPBOX =====
-dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+# ===== DROPBOX AUTO REFRESH =====
+dbx = None
+dbx_token_expire = None
+
+def get_dropbox_client():
+    global dbx, dbx_token_expire
+
+    now = now_vn()
+
+    if dbx and dbx_token_expire and now < dbx_token_expire:
+        return dbx
+
+    log("🔄 Refresh Dropbox token...")
+
+    url = "https://api.dropbox.com/oauth2/token"
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": DROPBOX_REFRESH_TOKEN,
+        "client_id": DROPBOX_APP_KEY,
+        "client_secret": DROPBOX_APP_SECRET
+    }
+
+    res = requests.post(url, data=data)
+    result = res.json()
+
+    if "access_token" not in result:
+        raise Exception(f"❌ Refresh token lỗi: {result}")
+
+    access_token = result["access_token"]
+    expires_in = result.get("expires_in", 14400)
+
+    dbx_token_expire = now + timedelta(seconds=expires_in - 60)
+    dbx = dropbox.Dropbox(access_token)
+
+    log("✅ Dropbox token refreshed")
+
+    return dbx
 
 # ===== CACHE =====
 cache_data = None
@@ -81,7 +125,6 @@ COL_MAP = {
     "TH": {"BD":"BF", "KT":"BG", "USER":"BH", "GHICHU":"BI"},
 }
 
-# ===== DISPLAY NAME =====
 HM_DISPLAY = {
     "KS": "Survey",
     "CH": "Delivery",
@@ -102,7 +145,7 @@ def col2num(col):
 # ===== PENDING UPLOAD =====
 pending_upload = {}
 MAX_UPLOAD = 5
-TIMEOUT = 5  # phút
+TIMEOUT = 5
 
 # ===== HANDLE =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -120,220 +163,62 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sites = sheet_progress.col_values(4)
     sites_upper = [s.strip().upper() for s in sites if s.strip()]
 
-    # ================= PIC COMMAND =================
+    # PIC COMMAND
     if text.upper().endswith("_PIC"):
         cmd = text.upper().split("_")
         if len(cmd) < 3:
             return
         hangmuc = cmd[-2]
         site_name = "_".join(cmd[:-2])
+
         if site_name not in sites_upper:
             await update.message.reply_text("❌ Không tìm thấy site")
             return
+
         pending_upload[user_id] = {
             "site": site_name,
             "hangmuc": hangmuc,
             "time": now_vn(),
             "count": 0
         }
-        await update.message.reply_text(f"📸 Chờ upload {site_name} | {hangmuc} (5 ảnh / 5 phút)")
+
+        await update.message.reply_text(f"📸 Chờ upload {site_name} | {hangmuc}")
         return
 
-    # ================= RECEIVE PHOTO =================
+    # RECEIVE PHOTO
     if update.message.photo:
         if user_id not in pending_upload:
             await update.message.reply_text("❌ Chưa có lệnh _PIC")
             return
+
         pend = pending_upload[user_id]
         now = now_vn()
-        if (now - pend["time"]).total_seconds() > TIMEOUT*60:
-            del pending_upload[user_id]
-            await update.message.reply_text("❌ Hết hạn upload")
-            return
-        if pend["count"] >= MAX_UPLOAD:
-            await update.message.reply_text("❌ Đã đủ 5 ảnh")
-            return
+
         try:
-            await update.message.reply_text("⏳ Đang upload Dropbox...")
+            await update.message.reply_text("⏳ Upload Dropbox...")
+
             file = await update.message.photo[-1].get_file()
             file_bytes = await file.download_as_bytearray()
             file_bytes = bytes(file_bytes)
+
             pend["count"] += 1
+
             filename = f"{now.strftime('%d%m')}_{pend['hangmuc']}_{pend['count']}.jpg"
             dropbox_path = f"/MBF HW/{pend['site']}/{pend['hangmuc']}/{filename}"
-            log(f"UPLOAD: {dropbox_path}")
-            dbx.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+
+            dbx_client = get_dropbox_client()
+            dbx_client.files_upload(file_bytes, dropbox_path, mode=dropbox.files.WriteMode.overwrite)
+
             await update.message.reply_text(f"✅ Upload {pend['count']}/5")
+
         except Exception as e:
             log(f"ERROR: {e}")
             await update.message.reply_text(f"❌ Upload lỗi: {e}")
-        return
 
-    # ================= UPDATE SHEET =================
-    if text.startswith("/") or "_" not in text:
         return
-
-    parts = text.split(" ", 1)
-    cmd_site = parts[0].upper()
-    note = parts[1] if len(parts) > 1 else ""
-    cmd = cmd_site.split("_")
-    if len(cmd) < 2:
-        return
-    hangmuc = cmd[-1]
-    site_name = "_".join(cmd[:-1])
-    action = None
-    if hangmuc not in COL_MAP:
-        if len(cmd) < 3:
-            return
-        hangmuc = cmd[-2]
-        action = cmd[-1]
-        site_name = "_".join(cmd[:-2])
-    if hangmuc not in COL_MAP:
-        await update.message.reply_text("❌ Sai hạng mục")
-        return
-
-    for idx, sheet_site in enumerate(sites, start=1):
-        if sheet_site.strip().upper() != site_name:
-            continue
-        cols = COL_MAP[hangmuc]
-        now_str = now_vn().strftime("%d/%m %H:%M")
-        col_bd = col2num(cols["BD"])
-        col_kt = col2num(cols["KT"])
-        col_user = col2num(cols["USER"])
-        col_note = col2num(cols["GHICHU"])
-        # NOTE
-        if note and not action:
-            old = sheet_progress.cell(idx, col_note).value
-            new = f"[{now_vn().strftime('%d/%m')}]: {note}"
-            sheet_progress.update_cell(idx, col_note, f"{old}\n{new}" if old else new)
-            clear_cache()
-            await update.message.reply_text("✅ Đã ghi chú")
-            return
-        # BD
-        if action == "BD":
-            sheet_progress.update_cell(idx, col_bd, now_str)
-            sheet_progress.update_cell(idx, col_user, user)
-            clear_cache()
-            await update.message.reply_text("✅ BD OK")
-            return
-        # KT
-        elif action == "KT":
-            sheet_progress.update_cell(idx, col_kt, now_str)
-            clear_cache()
-            await update.message.reply_text("✅ KT OK")
-            return
-
-    close = difflib.get_close_matches(site_name, sites_upper, n=3, cutoff=0.5)
-    await update.message.reply_text(f"❌ Sai site. Gợi ý: {', '.join(close)}")
-
-# ===== DAILY =====
-async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.full_name not in ADMINS:
-        return
-    if not context.args:
-        await update.message.reply_text("Dùng: /daily KS/CH/LD/CM/SW/OA/TD/TH")
-        return
-    hm = context.args[0].upper()
-    if hm not in COL_MAP:
-        await update.message.reply_text("❌ Sai hạng mục")
-        return
-    rows = get_sheet_data()
-    today = now_vn().strftime("%d/%m")
-    total = len(rows) - 2
-    cols = COL_MAP[hm]
-    col_bd = col2num(cols["BD"])
-    col_kt = col2num(cols["KT"])
-    col_user = col2num(cols["USER"])
-    done_today, done_total = 0, 0
-    doing_list, done_list = [], []
-    for row in rows[2:]:
-        if len(row) < col_kt:
-            continue
-        site = row[3]
-        bd = row[col_bd-1]
-        kt = row[col_kt-1]
-        user = row[col_user-1] if len(row) >= col_user else ""
-        if kt:
-            done_total += 1
-            if today in kt:
-                done_today += 1
-                done_list.append((site, user, kt))
-        elif bd and today in bd:
-            doing_list.append((site, user, bd))
-
-    display_name = HM_DISPLAY.get(hm, hm)
-    msg = f"📊 {display_name} TODAY ({today})\n\n"
-    msg += f"📌 FINISHED TODAY: {done_today}/{total}\n"
-    msg += f"📌 Total: {done_total}/{total}\n\n"
-    msg += "✅ Done\n"
-    msg += "\n".join([f"{s} | ✅ {u or 'N/A'} ({t})" for s,u,t in done_list]) or "Không có"
-    msg += "\n\n🟡 DOING\n"
-    msg += "\n".join([f"{s} | 🟡 {u or 'N/A'} ({t})" for s,u,t in doing_list]) or "Không có"
-    await update.message.reply_text(msg)
-
-# ===== REPORT =====
-async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.full_name not in ADMINS:
-        return
-    rows = get_sheet_data()
-    today = now_vn().strftime("%d/%m")
-    total = len(rows) - 2
-    msg = f"📊 REPORT ({today})\n\n"
-    for hm, cols in COL_MAP.items():
-        col_kt = col2num(cols["KT"])
-        done = 0
-        today_done = 0
-        for row in rows[2:]:
-            if len(row) < col_kt:
-                continue
-            kt = row[col_kt-1]
-            if kt:
-                done += 1
-                if today in kt:
-                    today_done += 1
-        display_name = HM_DISPLAY.get(hm, hm)
-        msg += f"{display_name}: {today_done}/{done}/{total}\n"
-    await update.message.reply_text(msg)
-
-# ===== UNDO =====
-async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.full_name
-    if user not in ADMINS:
-        return
-    if not context.args:
-        await update.message.reply_text("Dùng: /undo SITE_HM")
-        return
-    cmd = context.args[0].upper().split("_")
-    if len(cmd) < 2:
-        return
-    hm = cmd[-1]
-    site_name = "_".join(cmd[:-1])
-    if hm not in COL_MAP:
-        return
-    sites = sheet_progress.col_values(4)
-    for idx, s in enumerate(sites, start=1):
-        if s.strip().upper() != site_name:
-            continue
-        cols = COL_MAP[hm]
-        sheet_progress.update_cell(idx, col2num(cols["BD"]), "")
-        sheet_progress.update_cell(idx, col2num(cols["KT"]), "")
-        sheet_progress.update_cell(idx, col2num(cols["USER"]), "")
-        sheet_progress.update_cell(idx, col2num(cols["GHICHU"]), "")
-        clear_cache()
-        await update.message.reply_text(f"✅ Undo {site_name}_{hm}")
-        return
-
-# ===== RESET =====
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pending_upload.clear()
-    await update.message.reply_text("✅ Reset pending")
 
 # ===== RUN =====
 app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("daily", daily))  # Thay status bằng daily
-app.add_handler(CommandHandler("report", report))
-app.add_handler(CommandHandler("undo", undo))
-app.add_handler(CommandHandler("reset", reset))
 app.add_handler(MessageHandler(filters.ALL, handle))
 
 if __name__ == "__main__":
