@@ -186,7 +186,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pend = pending_upload[user_id]
         now = now_vn()
 
-        # timeout 5 phút
         if (now - pend["time"]).total_seconds() > TIMEOUT * 60:
             del pending_upload[user_id]
             await update.message.reply_text("❌ Hết hạn upload")
@@ -312,13 +311,13 @@ async def check_timeout(context: ContextTypes.DEFAULT_TYPE):
     for uid in remove_list:
         del pending_upload[uid]
 
-# ===== STATUS =====
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== DAILY (THAY STATUS) =====
+async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.full_name not in ADMINS:
         return
 
     if not context.args:
-        await update.message.reply_text("Dùng: /status KS")
+        await update.message.reply_text("Dùng: /daily KS")
         return
 
     hm = context.args[0].upper()
@@ -446,7 +445,8 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== RUN =====
 app = ApplicationBuilder().token(TOKEN).build()
 
-app.add_handler(CommandHandler("status", status))
+app.add_handler(CommandHandler("daily", daily))  # <-- ĐÃ ĐỔI
+
 app.add_handler(CommandHandler("report", report))
 app.add_handler(CommandHandler("undo", undo))
 app.add_handler(CommandHandler("reset", reset))
